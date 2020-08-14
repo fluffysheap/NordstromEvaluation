@@ -1,0 +1,85 @@
+Exercise 2
+
+This seems to be more of a discussion exercise rather than a coding one, so I
+will simply write up my thoughts here.
+
+At the risk of sounding flippant, the obvious answer to the problem is "fix
+the server."  Never work around a hardware problem in software unless there
+are no other options!
+
+But assuming that's not the answer you're looking for, there are a few options
+that come to mind.
+
+Option 1) Do nothing.  No, really.  This is, after all, a cache.  Cache misses
+are a thing that happens, nothing should be depending on a cache for
+correctness.  So while there would be a performance drop, it should be
+temporary until the cache warms up again.
+
+Option 2) Instead of keeping the data in memory, write it out to disk.  This
+is the most obvious solution and probably also the worst one.  There are a
+couple of problems with it.  First, it's very difficult to guarantee anything
+about the data in the presence of unknown failures.  It's very possible that
+inconsistent data could be written to the disk if a crash occurs.  In this
+case, the cache might return incorrect data - much worse than no data.  It
+also means that the objects in the cache need to be serialized.  Not all
+objects are capable of serialization!  Objects may refer to inherently
+non-persistable things like network connections, open files, user sessions,
+etc.  This means we need to start caring about the type of data that's stored
+in the cache.  It also means we need to have some time of serialization
+routine, whether that's the platform's built-in serialization library or
+something that serializes to JSON, XML or some other format.  Finally, it also
+introduces the possibility of duplicating objects.  There's no requirement
+that only one key can refer to a particular value object; in the case that
+multiple keys map to the same object, it's possible that serialization might
+duplicate that object rather than storing multiple references to it.  This
+could cause the program to fail.
+
+The remaining options experience the same serialization-related problems, so I
+won't repeat them.
+
+Option 3) Run the cache in a cluster-type system.  When a node fails and
+restarts, it can contact the other servers in the cluster for a fresh copy of
+the cache.  This seems easy, but it isn't.  Programming a distributed system
+to remain consistent is difficult, and requires all nodes to agree on writes
+using a protocol such as two-phase or three-phase commit.  Even in a
+replication-only system where one server handles all traffic and others are
+available only for failover, the risk of coding errors is substantial.
+
+Option 4) Host the cache somewhere else.  In AWS, Elasticache and DynamoDB
+would both work well for this application.  Now reliability is not our problem
+any more.
+
+-----
+
+It's hard to give an exact answer given the vagueness of the question, but
+with #1 and #4 being really ways to *avoid* the problem rather than *solve*
+the problem, the decision really comes down to #2 and #3.  #3 is the better
+choice.  #2 leaves open the case of unavoidable errors and unknown downtime
+while the server restarts.  So #3 is the choice.
+
+The easiest implementation of #3 is a primary/secondary system where the
+primary handles all client requests and issues update instructions to the
+secondary.  When a server fails, it comes up as the secondary.  Either the
+client connection library, or a load balancer front-end would have to handle
+the failover, as the new primary will necessarily have a different network
+address.  A fresh server coming up as secondary would be required to reject
+all connection requests at least until it has contacted the primary for a data
+transfer; once a failover occurs, the old primary must be forcibly killed (in
+case it just got stuck or fell off the network, rather than actually
+crashing); this needs to happen continously until it's confirmed dead by some
+means.
+
+Failover even for SQL databases where it's part of the product is never 100% reliable.
+
+It's also possible to design a fully distributed system where any server can
+handle requests, and failure is handled gracefully and always correctly.  This
+requires the three-phase commit protocol.  While more complex to implement, it
+is more reliable than simple failover.  In this case, all write operations
+(and when using LRU, *all* operations are write operations) require agreement
+of all servers; this will significantly increase request latency.  In terms of
+the code, this would take the form of defining a network protocol representing
+the operations defined in the commit protocol, and then executing that
+protocol before committing any writes to the memory cache.
+
+Turning a simple cache system into a distributed database is a big deal - we
+should really just fix the server.
